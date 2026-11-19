@@ -1,0 +1,12 @@
+# Binaries and test artifacts
+*.exe
+*.test
+*.out
+devincord
+
+# env file
+.env
+
+# runtime state
+devincord.json
+.devincord-*.json
