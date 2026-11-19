@@ -1,0 +1,76 @@
+name: deploy
+
+# Deploys main to Discloud once the test workflow succeeds. Keep the "test"
+# entry in sync with the workflow name in .github/workflows/test.yml.
+on:
+  workflow_run:
+    workflows: ["test"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize deployments and never cancel one in progress.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Refuse manual deploys outside main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Deployments can only be dispatched from main (got '$GITHUB_REF_NAME')."
+          exit 1
+
+      - name: Require deployment secrets
+        env:
+          DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
+          DISCLOUD_APP_ID: ${{ secrets.DISCLOUD_APP_ID }}
+          DISCLOUD_ENV: ${{ secrets.DISCLOUD_ENV }}
+        run: |
+          missing=""
+          for name in DISCLOUD_TOKEN DISCLOUD_APP_ID DISCLOUD_ENV; do
+            if [ -z "${!name}" ]; then
+              missing="${missing:+$missing, }${name}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets: $missing (see the Deployment section in README.md)."
+            exit 1
+          fi
+
+      - name: Checkout the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Skip when main moved on
+        id: tip
+        env:
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          tip="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$tip" != "$TARGET_SHA" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping deployment: $TARGET_SHA is no longer the tip of main ($tip)."
+          fi
+
+      - name: Deploy to Discloud
+        if: steps.tip.outputs.stale != 'true'
+        uses: discloud/deploy-action@fae7024653d941a19daa2b6f56d2ae208e008c54 # v1.4.5
+        with:
+          token: ${{ secrets.DISCLOUD_TOKEN }}
+          app_id: ${{ secrets.DISCLOUD_APP_ID }}
+          env: ${{ secrets.DISCLOUD_ENV }}
+          env_file: .env
